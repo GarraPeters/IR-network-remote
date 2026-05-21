@@ -20,7 +20,7 @@ Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
 // Compile-time defaults — overridden by NVS after first WIFI command
 #define WIFI_SSID_DEFAULT "<WIFI_SSID>"
-#define WIFI_PASS_DEFAULT "<WIFI_PASS>!"
+#define WIFI_PASS_DEFAULT "<WIFI_PASS>"
 const char* HOSTNAME = "ir-remote";
 
 static char gWifiSsid[64];

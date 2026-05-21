@@ -117,7 +117,8 @@ class SerialTransport:
         self.ser.port = port
         self.ser.baudrate = baud
         self.ser.timeout = 0.5  # readline timeout per attempt
-        self.ser.dtr = False    # don't pulse DTR — that resets the ESP32
+        self.ser.dtr = False    # EN line — keep high (not in reset)
+        self.ser.rts = False    # GPIO0 line — keep high (normal boot, not bootloader)
         self.ser.open()
 
         start = time.time()
@@ -127,6 +128,10 @@ class SerialTransport:
             if self.ser.readline().decode("utf-8", errors="ignore").strip() == "PONG":
                 if showed_waiting:
                     print(" ready")
+                # drain leftover PONGs queued while the ESP32 was booting
+                self.ser.timeout = 0.1
+                while self.ser.readline():
+                    pass
                 self.ser.timeout = 5
                 return
             if not showed_waiting and time.time() - start > 1.0:
