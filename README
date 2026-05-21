@@ -1,0 +1,254 @@
+# IR Remote
+
+ESP32-based IR blaster. The ESP32 exposes a WiFi HTTP server and a USB serial
+interface; Python scripts on the host record and replay signals.
+
+## Hardware
+
+- ESP32
+- IR LED on GPIO 2 (send)
+- IR receiver on GPIO 4 (receive)
+
+## Firmware
+
+Flash with PlatformIO:
+
+```bash
+cd platformio_project
+pio run --target upload
+```
+
+Once connected the ESP32 is reachable at `http://ir-remote.local` (mDNS) or
+its IP address. It also responds on the USB serial port at 115200 baud.
+
+WiFi credentials are stored in NVS flash and persist across reboots. The
+compiled-in defaults are used on first boot; after that use `wifi_setup.py`
+or the `/wifi` HTTP endpoint to update them without reflashing.
+
+## Transport
+
+All Python scripts accept `--serial` or `--port` to switch from WiFi to USB:
+
+```bash
+python3 record.py                        # WiFi (default)
+python3 record.py --serial               # USB serial, auto-detect port
+python3 record.py --port /dev/cu.usbserial1410  # USB serial, explicit port
+```
+
+## Signal database
+
+Signals are stored in `ir_signals.json` — one named entry per button.
+Decoded signals and raw timing fallbacks coexist in the same file:
+
+```json
+{
+  "tv_power":   { "protocol": "NEC",     "address": "0x4",  "command": "0x8",  "repeats": 0 },
+  "hifi_power": { "protocol": "SAMSUNG", "address": "0x7",  "command": "0x40", "repeats": 1 },
+  "odd_button": { "raw": [9000, 4500, 560, 1690, 560, 560], "repeats": 0 }
+}
+```
+
+Supported decoded protocols: NEC, SAMSUNG, SONY, RC5, RC6, LG, PANASONIC.
+Buttons that use an unknown protocol are stored as raw microsecond timings.
+
+## Scripts
+
+### wifi_setup.py — update WiFi credentials
+
+Updates the WiFi SSID and password stored in NVS flash without reflashing the
+firmware. The ESP32 reconnects immediately; the new credentials persist across
+reboots.
+
+```bash
+python3 wifi_setup.py                        # auto-detect port, prompt for credentials
+python3 wifi_setup.py MyNetwork              # prompt for password only
+python3 wifi_setup.py MyNetwork MyPassword   # pass everything inline
+python3 wifi_setup.py --port /dev/cu.usbserial1410 MyNetwork MyPassword
+```
+
+The password is hidden when prompted interactively. Credentials can also be
+updated over WiFi:
+
+```bash
+curl -X POST "http://ir-remote.local/wifi?ssid=MyNetwork&pass=MyPassword"
+```
+
+### record.py — capture signals
+
+```bash
+python3 record.py
+```
+
+Point the remote at the ESP32 and press each button when prompted. Enter `list`
+to see recorded signals, `quit` to exit. If the protocol is unrecognised the
+script automatically falls back to raw capture.
+
+```bash
+python3 record.py --raw   # always capture raw timings, skip protocol decode
+```
+
+### play.py — replay signals
+
+```bash
+python3 play.py list                             # list all recorded signals
+python3 play.py send tv_power                    # send a single signal
+python3 play.py sequence tv_power tv_hdmi1 tv_vol_up tv_vol_up
+python3 play.py sequence tv_power tv_hdmi1 --delay 1.5  # custom gap (seconds)
+```
+
+### ir_control.py — low-level scripting
+
+```bash
+python3 ir_control.py ping                              # check connectivity
+python3 ir_control.py send NEC 0x4 0x2 --repeats 1     # send raw signal
+python3 ir_control.py listen                            # print received signals
+```
+
+### md.py — Minidisc player control
+
+Interactive menu for controlling a MDS-S40 Minidisc player over IR. Handles T9-style
+text entry for track naming, sending entire keystroke sequences to the ESP32
+in one request so the device executes them locally.
+This is specifically designed for the MDS-S40 Minidisc player (it's what I got) but
+can easily be adapted for other players that use an IR remote.
+
+```bash
+python3 md.py
+python3 md.py --serial      # use USB serial transport
+```
+
+**Menu keys**
+
+| Key | Action |
+|-----|--------|
+| `n` | Enter naming mode (`md-name` signal) |
+| `t` | Type text (T9 encoding, sent as one sequence) |
+| `b` | Batch name tracks from a file |
+| `o` | Power on/off |
+| `]` | Next track |
+| `[` | Previous track |
+| `f` | FF (advance cursor / next character) |
+| `r` | RW (back cursor / previous character) |
+| `c` | Cycle character mode (number → upper → lower) |
+| `s` | Send any signal by name |
+| `+` | Increase inter-signal delay |
+| `-` | Decrease inter-signal delay |
+| `q` | Quit |
+
+**Batch track naming**
+
+Create a plain text file with one track name per line:
+
+```
+Side A
+My Favourite Song
+Track 3
+```
+
+Pass it on the command line to name all tracks non-interactively:
+
+```bash
+python3 md.py --names-file tracks.txt
+```
+
+Or press `b` inside the menu and enter the file path when prompted. The script
+sends the entire sequence for all tracks as a single request to the ESP32,
+which executes them in order with the correct timing.
+
+**Required signals in ir_signals.json**
+
+Record these with `record.py` before using `md.py`:
+
+| Name | Button |
+|------|--------|
+| `md-name` | Name/title edit |
+| `md-char` | Cycle character mode |
+| `md-ff` | FF / advance cursor |
+| `md-rw` | RW / back cursor |
+| `md-on` | Power |
+| `md-next` | Next track |
+| `md-prev` | Previous track |
+| `md-2` … `md-9`, `md-0` | Number / character keys |
+
+**T9 character map**
+
+| Key | Lower | Upper | Number |
+|-----|-------|-------|--------|
+| `2` | abc   | ABC   | 2 |
+| `3` | def   | DEF   | 3 |
+| `4` | ghi   | GHI   | 4 |
+| `5` | jkl   | JKL   | 5 |
+| `6` | mno   | MNO   | 6 |
+| `7` | prs   | PRS   | 7 |
+| `8` | tuv   | TUV   | 8 |
+| `9` | wxy   | WXY   | 9 |
+| `0` | qz    | QZ    | 0 |
+
+Spaces are entered with FF. Numbers advance the cursor automatically (no FF
+needed). The mode resets to lowercase at the end of each typed string.
+
+## ESP32 HTTP API
+
+| Method | Path               | Description |
+|--------|--------------------|-------------|
+| GET    | `/ping`            | Health check — returns `PONG` |
+| POST   | `/send`            | Send a decoded signal |
+| POST   | `/send/raw`        | Send raw microsecond timings |
+| GET    | `/recv`            | Poll for a decoded received signal |
+| GET    | `/recv/raw`        | Poll for raw received timings |
+| POST   | `/sequence`        | Queue a sequence of signals for local execution |
+| GET    | `/sequence/status` | Returns `BUSY n/total` or `IDLE` |
+| POST   | `/wifi`            | Update WiFi credentials in NVS and reconnect |
+
+### /send params
+
+| Param | Example | Notes |
+|-------|---------|-------|
+| `protocol` | `NEC` | Required |
+| `address` | `0x4` | Required, hex |
+| `command` | `0x8` | Required, hex |
+| `repeats` | `1` | Optional, default 0 |
+| `value` | `0x...` | Optional, used by SONY |
+
+### /sequence body fields
+
+| Field | Description |
+|-------|-------------|
+| `seq` | Pipe-delimited entries: `proto,addr,cmd,repeats[,value]`. Use `DELAY,<ms_hex>,0,0` to insert a pause. |
+| `delay` | Milliseconds between IR signals (default 300) |
+
+Returns `OK N` where N is the number of entries queued.
+
+### curl examples
+
+```bash
+curl http://ir-remote.local/ping
+
+curl -X POST "http://ir-remote.local/send?protocol=NEC&address=0x4&command=0x2"
+
+curl http://ir-remote.local/recv
+# → protocol=NEC&address=0x4&command=0x2&value=0x...
+
+curl -X POST http://ir-remote.local/send/raw \
+     --data "raw=9000,4500,560,1690,560,560&repeats=0"
+
+curl -X POST http://ir-remote.local/sequence \
+     --data "delay=400&seq=NEC,0x4,0x2,0|NEC,0x4,0x8,0"
+```
+
+## Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+Or with a virtual environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+- `requests` — WiFi HTTP transport
+- `pyserial` — USB serial transport (`--serial` / `--port`)
