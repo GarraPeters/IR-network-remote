@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IR Remote</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px 16px;
+    background: #14171c;
+    color: #e6e9ee;
+    font: 16px/1.4 system-ui, -apple-system, sans-serif;
+  }
+  main { max-width: 420px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  h2 {
+    font-size: 12px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: #8b93a1;
+    margin: 24px 0 8px;
+  }
+  .host { display: flex; gap: 8px; align-items: center; }
+  .host input {
+    flex: 1;
+    min-width: 0;
+    padding: 10px 12px;
+    border: 1px solid #2c323c;
+    border-radius: 8px;
+    background: #1c2027;
+    color: inherit;
+    font: inherit;
+  }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  button {
+    padding: 22px 12px;
+    border: 0;
+    border-radius: 12px;
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    touch-action: manipulation;
+    transition: transform .05s, filter .15s;
+  }
+  button:active { transform: scale(.97); }
+  button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+  button.busy { filter: brightness(1.4); }
+  .red { background: #a3262a; }
+  .orange { background: #a8690f; }
+  .white { background: #d5d9e0; color: #14171c; }
+  .plain { background: #2c323c; padding: 10px 14px; font-weight: 500; }
+  #status { min-height: 1.4em; margin-top: 20px; color: #8b93a1; font-size: 14px; }
+  #status.ok { color: #5fc27e; }
+  #status.err { color: #ef6b6b; }
+</style>
+</head>
+<body>
+<main>
+  <h1>IR Remote</h1>
+
+  <div class="host">
+    <input id="host" aria-label="IR blaster address" spellcheck="false" autocapitalize="off">
+    <button class="plain" id="ping">Ping</button>
+  </div>
+
+  <h2>Power</h2>
+  <div class="grid">
+    <button class="red" data-cmd="tv-on">TV power</button>
+    <button class="red" data-cmd="amp-on">Amp power</button>
+    <button class="white" data-cmd="pc-wake">Wake PC</button>
+  </div>
+
+  <h2>Amp input</h2>
+  <div class="grid">
+    <button class="orange" data-cmd="amp-optic">Optical</button>
+    <button class="orange" data-cmd="amp-linein">Line in</button>
+  </div>
+
+  <h2>Amp volume</h2>
+  <div class="grid">
+    <button class="red" data-cmd="amp-voldown">Vol &minus;</button>
+    <button class="red" data-cmd="amp-volup">Vol +</button>
+  </div>
+
+  <div id="status" role="status"></div>
+</main>
+
+<script>
+const DEFAULT_HOST = "192.168.1.200";
+
+// Same signals as KEY_COMMANDS in keybow-controlPad.py
+const COMMANDS = {
+  // Wake on LAN — the blaster broadcasts the magic packet (WOL_MAC in the script)
+  "pc-wake": {
+    path: "/wol",
+    params: { mac: "D8:43:AE:C9:AC:BA" },
+  },
+  "tv-on": {
+    path: "/send",
+    params: { protocol: "SONY", address: "0x1", command: "0x15", repeats: 4, value: "0xa90" },
+  },
+  "amp-on": {
+    path: "/send/raw",
+    params: {
+      repeats: 2,
+      raw: "9060,4474,600,1660,602,552,580,552,578,1662,600,554,576,554,576,554,580,1684,578,1662,600,552,578,556,576,1660,602,554,580,552,576,532,600,1662,600,556,576,554,578,554,576,554,578,552,578,554,578,1686,576,554,578,1662,598,1664,598,1662,600,1686,576,1664,598,1684,580,552,578,1662,602",
+    },
+  },
+  "amp-optic": {
+    path: "/send/raw",
+    params: {
+      repeats: 2,
+      raw: "9034,4492,584,1680,582,548,584,546,584,1678,584,548,582,552,580,550,580,1678,584,1680,584,548,584,548,582,1678,586,546,584,548,580,550,582,1680,582,548,584,546,582,550,582,550,582,1680,584,548,582,550,582,548,582,1680,584,1678,582,1678,582,1678,584,550,584,1676,584,1678,584,1680,582",
+    },
+  },
+  "amp-linein": {
+    path: "/send/raw",
+    params: {
+      repeats: 2,
+      raw: "9054,4474,602,1680,582,550,580,552,580,1662,602,550,580,550,582,548,582,1682,582,1680,580,550,582,550,580,1680,582,552,578,552,582,550,580,1660,600,1682,580,550,582,548,582,550,580,1662,602,550,580,550,582,548,582,550,582,1660,602,1680,582,1680,580,550,582,1660,602,1680,580,1682,580",
+    },
+  },
+  "amp-voldown": {
+    path: "/send/raw",
+    params: {
+      repeats: 2,
+      raw: "9056,4494,582,1660,602,550,582,548,580,1682,582,550,582,548,582,550,582,1678,584,1660,602,548,580,550,584,1678,582,550,580,550,584,550,582,1680,582,548,584,1680,586,546,580,1682,580,1682,582,548,580,552,580,550,582,1680,584,546,582,1662,602,550,582,548,582,1662,600,1680,582,1680,584",
+    },
+  },
+  "amp-volup": {
+    path: "/send/raw",
+    params: {
+      repeats: 2,
+      raw: "9038,4492,584,1678,584,548,584,550,580,1680,584,550,580,550,582,548,582,1678,586,1676,584,548,582,548,582,1678,584,550,582,548,584,548,584,1676,586,546,584,1678,584,1678,584,550,582,1676,586,548,582,548,586,546,584,1678,584,548,584,548,582,1680,584,548,584,1678,584,1680,584,1678,584",
+    },
+  },
+};
+
+const hostInput = document.getElementById("host");
+const statusEl = document.getElementById("status");
+
+let savedHost = null;
+try { savedHost = localStorage.getItem("irHost"); } catch {}
+hostInput.value = savedHost || DEFAULT_HOST;
+hostInput.addEventListener("change", () => {
+  try { localStorage.setItem("irHost", hostInput.value.trim()); } catch {}
+});
+
+function baseUrl() {
+  const host = hostInput.value.trim() || DEFAULT_HOST;
+  return /^https?:\/\//.test(host) ? host.replace(/\/+$/, "") : "http://" + host;
+}
+
+function setStatus(text, cls = "") {
+  statusEl.textContent = text;
+  statusEl.className = cls;
+}
+
+// When the page is served by the blaster itself, requests are same-origin and
+// the real reply can be read. Opened any other way (local file, another
+// server), the firmware sends no CORS headers, so requests go out as no-cors:
+// the blaster still acts on them, but the response is opaque — a resolved
+// fetch means the device was reached, a rejection means it wasn't.
+let onDevice = false;
+if (location.protocol.startsWith("http")) {
+  fetch("/ping")
+    .then((res) => (res.ok ? res.text() : ""))
+    .then((text) => {
+      if (text.trim() !== "PONG") return;
+      onDevice = true;
+      hostInput.hidden = true;
+    })
+    .catch(() => {});
+}
+
+async function request(method, path, params) {
+  const query = params ? "?" + new URLSearchParams(params) : "";
+  const signal = AbortSignal.timeout(3000);
+  if (!onDevice) {
+    await fetch(baseUrl() + path + query, { method, mode: "no-cors", signal });
+    return "sent";
+  }
+  const res = await fetch(path + query, { method, signal });
+  const text = (await res.text()).trim();
+  if (!res.ok) throw new Error(text || "HTTP " + res.status);
+  return text;
+}
+
+async function run(button, label, method, path, params) {
+  button.classList.add("busy");
+  setStatus(label + "…");
+  try {
+    setStatus(label + " — " + await request(method, path, params), "ok");
+  } catch (e) {
+    setStatus(label + " — " + (onDevice ? e.message : "couldn't reach " + baseUrl()), "err");
+  } finally {
+    button.classList.remove("busy");
+  }
+}
+
+for (const button of document.querySelectorAll("[data-cmd]")) {
+  const cmd = COMMANDS[button.dataset.cmd];
+  button.addEventListener("click", () =>
+    run(button, button.textContent, "POST", cmd.path, cmd.params));
+}
+
+document.getElementById("ping").addEventListener("click", (e) =>
+  run(e.currentTarget, "Ping", "GET", "/ping"));
+</script>
+</body>
+</html>

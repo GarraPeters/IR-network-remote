@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include <ESPmDNS.h>
 #include <ESPAsyncWebServer.h>
 #include "esp_wifi.h"
@@ -11,6 +12,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Preferences.h>
+#include "remote_html.h"
 
 #define OLED_SDA  23
 #define OLED_SCL  22
@@ -53,6 +55,12 @@ struct IrJob {
 static IrJob             gJob;
 static std::atomic<bool> gJobPending(false);
 static std::atomic<bool> gWifiReconnectPending(false);
+
+// Wake on LAN job (from /wol)
+#define WOL_PORT 9
+static WiFiUDP           gUdp;
+static uint8_t           gWolMac[6];
+static std::atomic<bool> gWolPending(false);
 
 // Sequence job (from /sequence) — executed non-blocking in loop()
 #define SEQ_MAX 1024
@@ -117,6 +125,65 @@ bool irSend(const String& protocol, uint32_t address, uint32_t command, int repe
     return ok;
 }
 
+// ---- Send feedback screen ----
+
+// Shown briefly after a send, then loop() restores the idle screen
+#define FEEDBACK_MS 1500
+static bool          gFeedbackActive = false;
+static unsigned long gFeedbackAt     = 0;
+
+void showFeedback(const char* title, const String& line1, const String& line2 = "") {
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+    display.setTextSize(2);
+    display.setCursor(0, 0);
+    display.println(title);
+    display.setTextSize(1);
+    display.setCursor(0, 28);
+    display.println(line1);
+    display.setCursor(0, 44);
+    display.println(line2);
+    display.display();
+    gFeedbackActive = true;
+    gFeedbackAt     = millis();
+}
+
+void showIrFeedback(bool ok, const String& protocol, uint32_t address, uint32_t command) {
+    if (ok) showFeedback("IR sent", protocol, "0x" + String(address, HEX) + " 0x" + String(command, HEX));
+    else    showFeedback("IR error", "Unknown protocol", protocol);
+}
+
+// ---- Wake on LAN ----
+
+// Accepts 12 hex digits with optional ':' or '-' separators
+bool parseMac(const String& s, uint8_t mac[6]) {
+    int nibbles = 0;
+    for (int i = 0; i < (int)s.length(); i++) {
+        char c = s[i];
+        if (c == ':' || c == '-') continue;
+        if (!isxdigit((unsigned char)c) || nibbles >= 12) return false;
+        uint8_t v = isdigit((unsigned char)c) ? c - '0' : (tolower(c) - 'a' + 10);
+        if (nibbles % 2 == 0) mac[nibbles / 2] = v << 4;
+        else                  mac[nibbles / 2] |= v;
+        nibbles++;
+    }
+    return nibbles == 12;
+}
+
+// Magic packet: 6 x 0xFF followed by the MAC repeated 16 times
+void sendWol(const uint8_t mac[6]) {
+    uint8_t packet[102];
+    memset(packet, 0xFF, 6);
+    for (int i = 0; i < 16; i++) memcpy(packet + 6 + i * 6, mac, 6);
+
+    for (int rep = 0; rep < 3; rep++) {
+        gUdp.beginPacket(WiFi.broadcastIP(), WOL_PORT);
+        gUdp.write(packet, sizeof(packet));
+        gUdp.endPacket();
+        if (rep < 2) delay(50);
+    }
+}
+
 // ---- Serial command handler (runs in loop() — safe to call irSend directly) ----
 
 void handleSerialCommand(const String& line) {
@@ -166,7 +233,9 @@ void handleSerialCommand(const String& line) {
         int      repeats  = tokens[3].toInt();
         uint32_t rawValue = (tc > 4) ? strtol(tokens[4].c_str(), nullptr, 16) : 0;
 
-        Serial.println(irSend(protocol, address, command, repeats, rawValue) ? "OK" : "ERROR unknown protocol");
+        bool ok = irSend(protocol, address, command, repeats, rawValue);
+        Serial.println(ok ? "OK" : "ERROR unknown protocol");
+        showIrFeedback(ok, protocol, address, command);
 
     } else if (cmd == "SEND_RAW") {
         int sp2 = line.indexOf(' ', sp + 1);
@@ -192,6 +261,7 @@ void handleSerialCommand(const String& line) {
         }
         irrecv.resume();
         Serial.println("OK");
+        showFeedback("IR sent", "RAW", String(count) + " timings");
 
     } else if (cmd == "WIFI") {
         // WIFI <ssid> <pass>  — pass may contain spaces
@@ -301,6 +371,11 @@ void setup() {
         display.println("Serial-only mode");
         display.display();
     }
+
+    // Control page — baked in from ../remote.html at build time
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->send(200, "text/html", REMOTE_HTML);
+    });
 
     server.on("/ping", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "text/plain", "PONG");
@@ -438,6 +513,22 @@ void setup() {
         }
     });
 
+    // Wake on LAN — queued to loop() like /send
+    server.on("/wol", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!req->hasArg("mac")) {
+            req->send(400, "text/plain", "ERROR missing mac arg");
+            return;
+        }
+        uint8_t mac[6];
+        if (!parseMac(req->arg("mac"), mac)) {
+            req->send(400, "text/plain", "ERROR invalid mac");
+            return;
+        }
+        memcpy(gWolMac, mac, 6);
+        gWolPending.store(true);
+        req->send(200, "text/plain", "OK");
+    });
+
     server.on("/wifi", HTTP_POST, [](AsyncWebServerRequest* req) {
         if (!req->hasArg("ssid") || !req->hasArg("pass")) {
             req->send(400, "text/plain", "ERROR missing ssid or pass");
@@ -480,8 +571,24 @@ void loop() {
             Serial.println("WiFi reconnected: " + gLocalIP);
             MDNS.begin(HOSTNAME);
             showConnectedScreen(gLocalIP);
-        } else if (connected && gWifiConnected) {
+        } else if (connected && gWifiConnected && !gFeedbackActive) {
             showConnectedScreen(gLocalIP);  // refresh RSSI every 5 s
+        }
+    }
+
+    // Restore the idle screen once send feedback has been up long enough
+    if (gFeedbackActive && millis() - gFeedbackAt >= FEEDBACK_MS) {
+        gFeedbackActive = false;
+        if (gWifiConnected) {
+            showConnectedScreen(gLocalIP);
+        } else {
+            display.clearDisplay();
+            display.setTextSize(1);
+            display.setTextColor(SSD1306_WHITE);
+            display.setCursor(0, 0);
+            display.println("WiFi offline");
+            display.println("Serial-only mode");
+            display.display();
         }
     }
 
@@ -489,6 +596,14 @@ void loop() {
         gWifiConnected = false;
         WiFi.disconnect();
         WiFi.begin(gWifiSsid, gWifiPass);
+    }
+
+    if (gWolPending.exchange(false)) {
+        sendWol(gWolMac);
+        char mac[18];
+        snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 gWolMac[0], gWolMac[1], gWolMac[2], gWolMac[3], gWolMac[4], gWolMac[5]);
+        showFeedback("WOL sent", mac);
     }
 
     // Execute single-shot jobs
@@ -500,8 +615,10 @@ void loop() {
                 if (rep < gJob.repeats) delay(100);
             }
             irrecv.resume();
+            showFeedback("IR sent", "RAW", String(gJob.rawCount) + " timings");
         } else {
-            irSend(String(gJob.protocol), gJob.address, gJob.command, gJob.repeats, gJob.rawValue);
+            bool ok = irSend(String(gJob.protocol), gJob.address, gJob.command, gJob.repeats, gJob.rawValue);
+            showIrFeedback(ok, String(gJob.protocol), gJob.address, gJob.command);
         }
     }
 
@@ -516,6 +633,7 @@ void loop() {
             } else {
                 irSend(proto, e.address, e.command, e.repeats, e.rawValue);
                 gSeqNextAt = millis() + gSeqDelay;
+                showFeedback("Sequence", String(gSeqIndex + 1) + "/" + String(gSeqCount), proto);
             }
             gSeqIndex++;
             if (gSeqIndex >= gSeqCount) {

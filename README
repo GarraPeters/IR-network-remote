@@ -21,6 +21,10 @@ pio run --target upload
 Once connected the ESP32 is reachable at `http://ir-remote.local` (mDNS) or
 its IP address. It also responds on the USB serial port at 115200 baud.
 
+Opening that address in a browser shows a control page with buttons for the
+saved signals. The page is `remote.html` in the repo root; it is baked into
+the firmware at build time, so re-run the upload after editing it.
+
 WiFi credentials are stored in NVS flash and persist across reboots. The
 compiled-in defaults are used on first boot; after that use `wifi_setup.py`
 or the `/wifi` HTTP endpoint to update them without reflashing.
@@ -191,6 +195,7 @@ needed). The mode resets to lowercase at the end of each typed string.
 
 | Method | Path               | Description |
 |--------|--------------------|-------------|
+| GET    | `/`                | Control page (`remote.html`) |
 | GET    | `/ping`            | Health check — returns `PONG` |
 | POST   | `/send`            | Send a decoded signal |
 | POST   | `/send/raw`        | Send raw microsecond timings |
@@ -199,6 +204,7 @@ needed). The mode resets to lowercase at the end of each typed string.
 | POST   | `/sequence`        | Queue a sequence of signals for local execution |
 | GET    | `/sequence/status` | Returns `BUSY n/total` or `IDLE` |
 | POST   | `/wifi`            | Update WiFi credentials in NVS and reconnect |
+| POST   | `/wol`             | Broadcast a Wake on LAN magic packet — `mac=D8:43:AE:C9:AC:BA` |
 
 ### /send params
 
